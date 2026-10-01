@@ -917,11 +917,10 @@ def _loop_summary(onsets, labels, classes):
 
 def _resolve_f0(seg, sr, t_env, v_env):
     """Wrapper around measure_f0_multi + settled_fundamental.
-    BUG A: _find_settled_body (called from measure_f0_multi's
-    _resolve_body_and_f0 path) fails on late-peak kicks. Do not fix
-    without user sign-off."""
+    BUG A: _find_settled_body fails on late-peak kicks. Do not fix
+    without user sign-off. _find_settled_body is imported at the top
+    of this file (not here) so the analyzer bundle can load it."""
     seg_ms = len(seg) / sr * 1000.0
-    from .envelope import _find_settled_body
     win = _find_settled_body(t_env, v_env, seg_ms) if len(v_env) else None
     if win is None:
         return None, None, {}, None, None, 'no_settled_body', 0, []
@@ -966,6 +965,63 @@ def to_json(result):
         kk = {kk: vv for kk, vv in k.items() if kk != '_arrays'}
         r['kicks'].append(kk)
     return r
+
+
+# =====================================================================
+# human-readable report
+# =====================================================================
+def print_report(r):
+    print("=" * 66)
+    print("  " + r['source'])
+    print("=" * 66)
+    m = r['meta']
+    sr_val = m.get('sr_nominal') or m.get('sr_effective', 0)
+    print("  Format:      " + str(m['format']))
+    print("  SR:          %.1f Hz" % sr_val)
+    print("  Nyquist:     %.1f Hz" % m['nyquist_hz'])
+    print("  Duration:    %.1f ms" % m['duration_ms'])
+    print("  Peak:        %.4f" % m['peak'])
+    print("")
+    print("  ID:          " + str(r.get('id')))
+    print("  Onsets: %d   Classes: %d   Sizes: %s" %
+          (r['loop']['n_onsets'], r['loop']['n_classes'],
+           str(r['loop']['class_sizes'])))
+    print("")
+    env_keys = ['attack_t_ms', 'attack_level', 'valley_t_ms',
+                'valley_level_pct', 'reswell_t_ms', 'reswell_level_pct',
+                'peak2_t_ms', 'peak2_level_pct', 'peak3_t_ms',
+                'peak3_level_pct', 'body_100ms_pct', 'lvl_200ms_pct',
+                'duration_ms', 'n_peaks']
+    for k in r['kicks']:
+        print("  -- class %d  (%d occurrences)  [%s] --" %
+              (k['class_id'], k['n_instances'], k.get('class', '?')))
+        print("    segment peak: %.4f   raw peak at: %.2f ms" %
+              (k['seg_peak'], k.get('raw_peak_ms', 0)))
+        det = k.get('detail', {})
+        env = det.get('envelope', {})
+        for key in env_keys:
+            if key in env:
+                v = env[key]
+                fmt = "%-22s %10.3f" if isinstance(v, float) \
+                    else "%-22s %10d"
+                print("    " + fmt % (key, v))
+        p = det.get('pitch', {})
+        if p.get('f_settled_hz') is not None:
+            print("    %-22s %10.2f" % ('f_settled_hz', p['f_settled_hz']))
+        if p.get('f_settled_agreement_hz') is not None:
+            print("    %-22s %10.2f" % ('f_settled_agreement_hz',
+                                        p['f_settled_agreement_hz']))
+        if p.get('f_settled_methods'):
+            print("    f_settled_methods:    " +
+                  ", ".join("%s=%.1f" % (mm, vv)
+                            for mm, vv in p['f_settled_methods'].items()))
+        c = det.get('content', {})
+        print("    %-22s %10s" %
+              ('click_present', str(c.get('click_present'))))
+        for kk in ['click_ratio_db', 'harmonic_ratio_2f0_db']:
+            if c.get(kk) is not None:
+                print("    %-22s %10.2f" % (kk, c[kk]))
+        print("")return r
 
 
 # =====================================================================
