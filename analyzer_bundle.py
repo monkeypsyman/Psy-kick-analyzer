@@ -700,14 +700,13 @@ def harmonic_ratio_db(S, freqs, times, f0, seg=None, sr=44100):
 ############################################################
 # from analyzer/pipeline.py
 ############################################################
-"""Top-level pipeline. This file reads top to bottom as the analyzer's
-story. Delegate to the specific module for any change to a measurement.
+"""Top-level pipeline. Reads top to bottom as the analyzer's story.
 
     analyze_array / analyze_file          entry points
       -> normalize, detect_onsets, group_onsets
       -> for each class: _extract_segment -> analyze_kick
           -> envelope, landmarks, pitch, spectral
-      -> _assemble_result
+      -> assemble
 
 The fingerprint shape (flat, per PROJECT_STATE S7) is built in
 analyze_kick.
@@ -755,7 +754,6 @@ def analyze_array(x, sr, source='<array>', window_ms=500, headroom_ms=40,
 # the pipeline
 # =====================================================================
 def _run(x, sr, meta, source, window_ms, headroom_ms):
-    """Ordered stages. Read this to see what the analyzer does."""
     meta = _fill_meta(meta, x, sr)
     xn = _normalize(x)
     onsets = detect_onsets(xn, sr)
@@ -792,9 +790,6 @@ def _analyze_class(xn, sr, onsets, idxs, class_id, window_ms, headroom_ms):
 
 def analyze_kick(seg, sr, class_id, n_instances,
                  onset_samples, first_onset_ms):
-    """Everything done to one kick segment. Returns a flat fingerprint
-    row with a nested `detail` for the fields also promoted to the
-    top level. `_arrays` (transient) is stripped by to_json()."""
     seg_peak = float(np.max(np.abs(seg))) if len(seg) else 1.0
     raw_peak_idx = int(np.argmax(np.abs(seg))) if len(seg) else 0
     raw_peak_ms = raw_peak_idx / sr * 1000
@@ -837,8 +832,7 @@ def analyze_kick(seg, sr, class_id, n_instances,
         'raw_peak_ms': float(raw_peak_ms),
         'class': _classify(raw_peak_ms),
 
-        # flat query fields
-        'f_settled_hz': None,
+        'f_settled_hz': f0,
         'f_settled_agreement_hz': f0_agr,
         'duration_ms': _g(landmarks, 'duration_ms'),
         'attack_t_ms': _g(landmarks, 'attack_t_ms'),
@@ -852,14 +846,12 @@ def analyze_kick(seg, sr, class_id, n_instances,
         'click_ratio_db': click_db,
         'harmonic_ratio_2f0_db': harm_db,
 
-        # nested detail (source of truth for the flat fields above)
         'detail': {
             'envelope': landmarks,
             'pitch': pitch_detail,
             'content': content_detail,
         },
 
-        # transient arrays (stripped by to_json, kept for browser render)
         '_arrays': {
             't_env': t_env, 'v_env': v_env,
             't_sw': t_sw, 'v_sw': v_sw,
@@ -869,7 +861,6 @@ def analyze_kick(seg, sr, class_id, n_instances,
             'centroid': cen, 'seg': seg,
         },
     }
-    row['f_settled_hz'] = f0
     row['detail']['pitch']['f_settled_hz'] = f0
     return row
 
@@ -916,10 +907,6 @@ def _loop_summary(onsets, labels, classes):
 
 
 def _resolve_f0(seg, sr, t_env, v_env):
-    """Wrapper around measure_f0_multi + settled_fundamental.
-    BUG A: _find_settled_body fails on late-peak kicks. Do not fix
-    without user sign-off. _find_settled_body is imported at the top
-    of this file (not here) so the analyzer bundle can load it."""
     seg_ms = len(seg) / sr * 1000.0
     win = _find_settled_body(t_env, v_env, seg_ms) if len(v_env) else None
     if win is None:
@@ -938,7 +925,6 @@ def _resolve_f0(seg, sr, t_env, v_env):
 
 
 def _classify(raw_peak_ms):
-    """Fishtail if raw_peak_ms <= threshold, else swell."""
     if raw_peak_ms is None:
         return None
     return ('fishtail' if raw_peak_ms <= FISHTAIL_PEAK_MAX_MS
@@ -946,7 +932,6 @@ def _classify(raw_peak_ms):
 
 
 def _content_id(x, sr):
-    """Content-hash ID over the head of the decoded PCM."""
     n = min(len(x), int(ID_SECONDS * sr))
     q = np.clip(x[:n] * 32767, -32768, 32767).astype(np.int16)
     h = hashlib.sha256(q.tobytes()).hexdigest()[:ID_HASH_LEN]
@@ -957,13 +942,74 @@ def _g(d, k):
     return d.get(k) if isinstance(d, dict) else None
 
 
+# =====================================================================
+# human-readable report
+# =====================================================================
+def print_report(r):
+    bar = "=" * 66
+    print(bar)
+    print("  " + r['source'])
+    print(bar)
+    m = r['meta']
+    sr_val = m.get('sr_nominal') or m.get('sr_effective', 0)
+    print("  Format:      " + str(m['format']))
+    print("  SR:          %.1f Hz" % sr_val)
+    print("  Nyquist:     %.1f Hz" % m['nyquist_hz'])
+    print("  Duration:    %.1f ms" % m['duration_ms'])
+    print("  Peak:        %.4f" % m['peak'])
+    print()
+    print("  ID:          " + str(r.get('id')))
+    print("  Onsets: %d   Classes: %d   Sizes: %s" %
+          (r['loop']['n_onsets'], r['loop']['n_classes'],
+           str(r['loop']['class_sizes'])))
+    print()
+    env_keys = ['attack_t_ms', 'attack_level', 'valley_t_ms',
+                'valley_level_pct', 'reswell_t_ms', 'reswell_level_pct',
+                'peak2_t_ms', 'peak2_level_pct', 'peak3_t_ms',
+                'peak3_level_pct', 'body_100ms_pct', 'lvl_200ms_pct',
+                'duration_ms', 'n_peaks']
+    for k in r['kicks']:
+        print("  -- class %d  (%d occurrences)  [%s] --" %
+              (k['class_id'], k['n_instances'], k.get('class', '?')))
+        print("    segment peak: %.4f   raw peak at: %.2f ms" %
+              (k['seg_peak'], k.get('raw_peak_ms', 0)))
+        det = k.get('detail', {})
+        env = det.get('envelope', {})
+        for key in env_keys:
+            if key in env:
+                v = env[key]
+                fmt = "%-22s %10.3f" if isinstance(v, float) \
+                    else "%-22s %10d"
+                print("    " + fmt % (key, v))
+        p = det.get('pitch', {})
+        if p.get('f_settled_hz') is not None:
+            print("    %-22s %10.2f" % ('f_settled_hz', p['f_settled_hz']))
+        if p.get('f_settled_agreement_hz') is not None:
+            print("    %-22s %10.2f" % ('f_settled_agreement_hz',
+                                        p['f_settled_agreement_hz']))
+        if p.get('f_settled_methods'):
+            joined = ", ".join("%s=%.1f" % (mm, vv)
+                               for mm, vv in p['f_settled_methods'].items())
+            print("    f_settled_methods:    " + joined)
+        c = det.get('content', {})
+        print("    %-22s %10s" %
+              ('click_present', str(c.get('click_present'))))
+        for kk in ['click_ratio_db', 'harmonic_ratio_2f0_db']:
+            if c.get(kk) is not None:
+                print("    %-22s %10.2f" % (kk, c[kk]))
+        print()
+
+
+# =====================================================================
+# JSON-safe export
+# =====================================================================
 def to_json(result):
-    """JSON-safe copy: strips the transient `_arrays` on each kick."""
     r = dict(result)
     r['kicks'] = []
     for k in result.get('kicks', []):
         kk = {kk: vv for kk, vv in k.items() if kk != '_arrays'}
         r['kicks'].append(kk)
+    return ricks'].append(kk)
     return r
 
 
