@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Commit Tool</title>
+<style>
+  html, body { background:#0f1216; color:#ccd; margin:0; padding:14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size:14px; }
+  h1 { color:#4fd6e0; font-size:15px; margin:0 0 4px 0; }
+  .sub { color:#667; font-size:11px; margin:0 0 16px 0; }
+  label { display:block; font-size:10px; color:#667; margin:10px 0 3px 0;
+    letter-spacing:.4px; text-transform:uppercase; }
+  input[type=text], input[type=password], textarea, select {
+    width:100%; box-sizing:border-box; background:#161a20;
+    border:1px solid #334; color:#ccd; font-family:inherit;
+    font-size:13px; padding:8px; border-radius:3px; }
+  textarea { height:320px; resize:vertical; line-height:1.4;
+    white-space:pre; overflow-wrap:normal; overflow-x:auto; }
+  select { margin-bottom:6px; }
+  button { background:#4fd6e0; color:#04252a; border:0;
+    padding:10px 14px; font-family:inherit; font-size:12px;
+    font-weight:700; border-radius:3px; cursor:pointer;
+    margin:6px 6px 0 0; letter-spacing:.4px; }
+  button.alt { background:#334; color:#ccd; }
+  button.warn { background:#ff5f6d; color:#2a0407; }
+  button:active { filter:brightness(1.2); }
+  #status { font-size:12px; padding:10px 0; min-height:1em;
+    white-space:pre-wrap; color:#a78bfa; }
+  #status.ok { color:#5ee08a; }
+  #status.err { color:#ff5f6d; }
+  #meta { font-size:10px; color:#556; margin-top:3px; }
+  .row { margin-bottom:4px; }
+  .sep { border-top:1px dashed #223; margin:18px 0 8px 0; }
+  .hint { font-size:10px; color:#556; margin-top:4px; }
+  a { color:#4fd6e0; }
+  #tokenSetup { background:#161a20; border-left:3px solid #ffb347;
+    padding:10px 12px; border-radius:3px; margin-bottom:14px;
+    font-size:11px; line-height:1.6; }
+  #tokenSetup b { color:#ffb347; }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+
+<h1>Commit Tool</h1>
+<p class="sub">Direct GitHub commits from this phone. Token stays in localStorage.</p>
+
+<div id="tokenSetup">
+  <b>First-time setup.</b> Paste a fine-grained GitHub PAT with
+  <b>Contents: Read and write</b> on <b>Psy-kick-analyzer</b>.
+  It stays in this phone's localStorage.
+</div>
+
+<div class="row">
+  <label>Token</label>
+  <input id="token" type="password" autocomplete="off"
+         autocorrect="off" autocapitalize="off" spellcheck="false"
+         placeholder="github_pat_...">
+</div>
+
+<div class="sep"></div>
+
+<div class="row">
+  <label>Path (presets or type)</label>
+  <select id="presets">
+    <option value="">— pick a common file —</option>
+    <option value="index.html">index.html</option>
+    <option value="app.js">app.js</option>
+    <option value="tool.html">tool.html</option>
+    <option value="build.py">build.py</option>
+    <option value="README.md">README.md</option>
+    <option value=".gitignore">.gitignore</option>
+    <option value=".github/workflows/build.yml">.github/workflows/build.yml</option>
+    <option value="analyzer/__init__.py">analyzer/__init__.py</option>
+    <option value="analyzer/config.py">analyzer/config.py</option>
+    <option value="analyzer/io.py">analyzer/io.py</option>
+    <option value="analyzer/onsets.py">analyzer/onsets.py</option>
+    <option value="analyzer/envelope.py">analyzer/envelope.py</option>
+    <option value="analyzer/pitch_methods.py">analyzer/pitch_methods.py</option>
+    <option value="analyzer/pitch.py">analyzer/pitch.py</option>
+    <option value="analyzer/spectral.py">analyzer/spectral.py</option>
+    <option value="analyzer/pipeline.py">analyzer/pipeline.py</option>
+    <option value="analyzer/batch.py">analyzer/batch.py</option>
+    <option value="cluster/__init__.py">cluster/__init__.py</option>
+    <option value="cluster/load.py">cluster/load.py</option>
+    <option value="cluster/run.py">cluster/run.py</option>
+    <option value="cluster/query.py">cluster/query.py</option>
+    <option value="tests/test_synthetic.py">tests/test_synthetic.py</option>
+    <option value="tests/test_invariants.py">tests/test_invariants.py</option>
+    <option value="tests/expected.json">tests/expected.json</option>
+  </select>
+  <input id="path" type="text" autocorrect="off" autocapitalize="off"
+         spellcheck="false" placeholder="analyzer/config.py">
+</div>
+
+<div class="row">
+  <label>Commit message</label>
+  <input id="message" type="text" autocorrect="off" autocapitalize="off"
+         spellcheck="false" placeholder="Update config">
+</div>
+
+<div class="row">
+  <label>Content</label>
+  <textarea id="content" autocorrect="off" autocapitalize="off"
+            spellcheck="false" placeholder="Paste file content here"></textarea>
+  <div id="meta">0 chars · 0 lines</div>
+</div>
+
+<div class="row">
+  <button id="commit">Commit</button>
+  <button id="load" class="alt">Load current</button>
+  <button id="clear" class="alt">Clear</button>
+  <button id="delete" class="warn">Delete</button>
+</div>
+
+<div id="status"></div>
+
+<script>
+(function () {
+  var REPO = 'monkeypsyman/Psy-kick-analyzer';
+  var BRANCH = 'main';
+  var TOKEN_KEY = 'psy_kick_pat';
+  var API = 'https://api.github.com/repos/' + REPO + '/contents/';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var tokenEl = $('token');
+  var pathEl = $('path');
+  var msgEl = $('message');
+  var contentEl = $('content');
+  var metaEl = $('meta');
+  var statusEl = $('status');
+  var presetsEl = $('presets');
+  var tokenSetupEl = $('tokenSetup');
+
+  function setStatus(msg, kind) {
+    statusEl.textContent = msg;
+    statusEl.className = kind || '';
+  }
+
+  function updateMeta() {
+    var v = contentEl.value;
+    var lines = v ? v.split('\n').length : 0;
+    metaEl.textContent = v.length + ' chars \u00b7 ' + lines + ' lines';
+  }
+
+  function loadToken() {
+    var saved = localStorage.getItem(TOKEN_KEY);
+    if (saved) {
+      tokenEl.value = saved;
+      tokenSetupEl.classList.add('hide');
+    }
+  }
+
+  tokenEl.addEventListener('input', function () {
+    var v = tokenEl.value.trim();
+    if (v) {
+      localStorage.setItem(TOKEN_KEY, v);
+      tokenSetupEl.classList.add('hide');
+    } else {
+      localStorage.removeItem(TOKEN_KEY);
+      tokenSetupEl.classList.remove('hide');
+    }
+  });
+
+  presetsEl.addEventListener('change', function () {
+    if (presetsEl.value) {
+      pathEl.value = presetsEl.value;
+      if (!msgEl.value) {
+        var base = presetsEl.value.split('/').pop();
+        msgEl.value = 'Update ' + base;
+      }
+    }
+  });
+
+  contentEl.addEventListener('input', updateMeta);
+
+  function b64Encode(str) {
+    var bytes = new TextEncoder().encode(str);
+    var binary = '';
+    var chunk = 0x8000;
+    for (var i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(
+        null, bytes.subarray(i, Math.min(i + chunk, bytes.length))
+      );
+    }
+    return btoa(binary);
+  }
+
+  function b64Decode(b64) {
+    var clean = b64.replace(/\n/g, '');
+    var binary = atob(clean);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+  }
+
+  function authHeaders(token) {
+    return {
+      'Authorization': 'Bearer ' + token,
+      'Accept': 'application/vnd.github+json'
+    };
+  }
+
+  async function getSha(path, token) {
+    var url = API + path.split('/').map(encodeURIComponent).join('/')
+            + '?ref=' + BRANCH;
+    var r = await fetch(url, { headers: authHeaders(token) });
+    if (r.status === 404) return null;
+    if (!r.ok) {
+      var t = await r.text();
+      throw new Error('GET ' + r.status + ' ' + t.slice(0, 120));
+    }
+    var data = await r.json();
+    return data.sha;
+  }
+
+  async function commit(path, content, message, token) {
+    var sha = await getSha(path, token);
+    var body = {
+      message: message,
+      content: b64Encode(content),
+      branch: BRANCH
+    };
+    if (sha) body.sha = sha;
+    var url = API + path.split('/').map(encodeURIComponent).join('/');
+    var r = await fetch(url, {
+      method: 'PUT',
+      headers: Object.assign(
+        authHeaders(token),
+        { 'Content-Type': 'application/json' }
+      ),
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) {
+      var t = await r.text();
+      throw new Error('PUT ' + r.status + ' ' + t.slice(0, 200));
+    }
+    return r.json();
+  }
+
+  async function loadFile(path, token) {
+    var url = API + path.split('/').map(encodeURIComponent).join('/')
+            + '?ref=' + BRANCH;
+    var r = await fetch(url, { headers: authHeaders(token) });
+    if (!r.ok) throw new Error('GET ' + r.status);
+    var data = await r.json();
+    return b64Decode(data.content);
+  }
+
+  async function deleteFile(path, message, token) {
+    var sha = await getSha(path, token);
+    if (!sha) throw new Error('file does not exist');
+    var url = API + path.split('/').map(encodeURIComponent).join('/');
+    var r = await fetch(url, {
+      method: 'DELETE',
+      headers: Object.assign(
+        authHeaders(token),
+        { 'Content-Type': 'application/json' }
+      ),
+      body: JSON.stringify({ message: message, sha: sha, branch: BRANCH })
+    });
+    if (!r.ok) {
+      var t = await r.text();
+      throw new Error('DELETE ' + r.status + ' ' + t.slice(0, 200));
+    }
+    return r.json();
+  }
+
+  function needToken() {
+    var t = tokenEl.value.trim();
+    if (!t) {
+      setStatus('No token. Paste your PAT above.', 'err');
+      return null;
+    }
+    return t;
+  }
+
+  function needPath() {
+    var p = pathEl.value.trim();
+    if (!p) {
+      setStatus('No path. Pick a preset or type one.', 'err');
+      return null;
+    }
+    return p;
+  }
+
+  $('commit').addEventListener('click', async function () {
+    var t = needToken(); if (!t) return;
+    var p = needPath(); if (!p) return;
+    var c = contentEl.value;
+    if (!c) {
+      setStatus('No content to commit. Paste the file body.', 'err');
+      return;
+    }
+    var m = msgEl.value.trim() || ('Update ' + p.split('/').pop());
+    setStatus('Committing ' + p + '...');
+    try {
+      var res = await commit(p, c, m, t);
+      var sha = (res.commit && res.commit.sha || '').slice(0, 7);
+      var url = res.commit && res.commit.html_url;
+      setStatus('Committed ' + p + ' @ ' + sha + '\n' + (url || ''),
+                'ok');
+    } catch (e) {
+      setStatus('Failed: ' + e.message, 'err');
+    }
+  });
+
+  $('load').addEventListener('click', async function () {
+    var t = needToken(); if (!t) return;
+    var p = needPath(); if (!p) return;
+    setStatus('Loading ' + p + '...');
+    try {
+      var text = await loadFile(p, t);
+      contentEl.value = text;
+      updateMeta();
+      setStatus('Loaded ' + p + ' (' + text.length + ' chars)', 'ok');
+    } catch (e) {
+      setStatus('Failed: ' + e.message, 'err');
+    }
+  });
+
+  $('clear').addEventListener('click', function () {
+    contentEl.value = '';
+    updateMeta();
+    setStatus('');
+  });
+
+  $('delete').addEventListener('click', async function () {
+    var t = needToken(); if (!t) return;
+    var p = needPath(); if (!p) return;
+    if (!confirm('Delete ' + p + ' from the repo?')) return;
+    var m = msgEl.value.trim() || ('Delete ' + p.split('/').pop());
+    setStatus('Deleting ' + p + '...');
+    try {
+      await deleteFile(p, m, t);
+      setStatus('Deleted ' + p, 'ok');
+    } catch (e) {
+      setStatus('Failed: ' + e.message, 'err');
+    }
+  });
+
+  loadToken();
+  updateMeta();
+})();
+</script>
+
+</body>
+</html>
