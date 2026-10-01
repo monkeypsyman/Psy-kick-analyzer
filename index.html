@@ -1,228 +1,296 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kick Analyzer — Pyodide</title>
-<script src="https://cdn.jsdelivr.net/pyodide/v0.28.0/full/pyodide.js"></script>
+<title>Psy Kick Analyzer</title>
 <style>
-  :root{--bg:#0f1216;--panel:#161a20;--line:#232a33;--text:#ccd;--dim:#889;
-        --wave:#4fd6e0;--env:#ffb347}
-  *{box-sizing:border-box}
-  body{margin:0;padding:16px;background:var(--bg);color:var(--text);
-       font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}
-  h1{font-size:14px;margin:0 0 12px 0}
-  #status{padding:6px 10px;background:var(--panel);border-left:3px solid var(--wave);
-          color:var(--dim);font-size:12px;border-radius:3px;margin-bottom:12px}
-  #status.err{border-left-color:#ff5f6d;color:#ff5f6d}
-  #status.ok{border-left-color:#5ee08a;color:#5ee08a}
-  input[type=file]{display:block;margin-bottom:12px;color:var(--dim);
-                   font-size:12px;width:100%}
-  canvas{display:block;width:100%;height:220px;background:#0b0e12;
-         border-radius:4px;margin-top:10px}
-  #output{white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);
-          border-radius:4px;padding:10px;font-size:11px;color:var(--dim);
-          margin-top:10px;max-height:260px;overflow:auto}
-  button{font:inherit;font-size:12px;background:#1d242c;color:var(--text);
-         border:1px solid var(--line);border-radius:4px;padding:6px 14px;
-         cursor:pointer;margin-top:8px}
-  button:disabled{opacity:.4;cursor:default}
+  html, body { background:#0f1216; color:#ccd; margin:0; padding:20px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h1 { color:#4fd6e0; font-size:16px; margin:0 0 4px 0; }
+  .sub { color:#667; font-size:11px; margin:0 0 20px 0; }
+  #drop { border:2px dashed #334; border-radius:6px; padding:36px;
+    text-align:center; color:#667; cursor:pointer; transition: all .15s;
+    font-size:12px; }
+  #drop.hover { border-color:#4fd6e0; color:#4fd6e0; background:#0e1a1e; }
+  #drop input { display:none; }
+  #status { font-size:11px; color:#a78bfa; padding:8px 0; min-height:1em; }
+  #err { font-size:11px; color:#ff5f6d; white-space:pre-wrap; }
+  canvas { display:block; background:#0a0d10; border:1px solid #223;
+    border-radius:3px; margin:14px 0; width:100%; height:260px; }
+  #fp { font-size:11px; color:#889; line-height:1.7;
+    border-top:1px dashed #223; padding-top:12px; margin-top:12px; }
+  #fp b { color:#a78bfa; }
+  #fp .val { color:#5ee08a; }
+  button { background:#4fd6e0; color:#04252a; border:0;
+    padding:7px 14px; font-family:inherit; font-size:11px;
+    font-weight:700; border-radius:3px; cursor:pointer;
+    margin-right:6px; letter-spacing:.4px; }
+  button.stop { background:#ff5f6d; color:#2a0407; }
+  button:hover { filter:brightness(1.15); }
+  .legend { font-size:10px; color:#667; margin:8px 0; }
+  .legend span { margin-right:14px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%;
+    margin-right:5px; vertical-align:middle; }
 </style>
 </head>
 <body>
-<h1>Kick Analyzer — Pyodide / WASM</h1>
-<div id="status">Loading Pyodide (~10 MB, cached after first visit)…</div>
+<h1>Psy Kick Analyzer</h1>
+<p class="sub">Drop a WAV. Python (Pyodide/WASM) analyzes it. Canvas renders.</p>
 
-<input type="file" id="wavInput" accept=".wav" disabled>
-<canvas id="scope" width="1000" height="220"></canvas>
-<div id="output">ready.</div>
-<button id="playBtn" disabled>▶ play</button>
+<div id="drop">
+  <input type="file" id="file" accept=".wav">
+  <div>Click or drop a WAV here</div>
+</div>
+<div id="status"></div>
+<div id="err"></div>
 
+<canvas id="scope"></canvas>
+<div class="legend">
+  <span><span class="dot" style="background:#ff5f6d"></span>attack</span>
+  <span><span class="dot" style="background:#ffb347"></span>valley</span>
+  <span><span class="dot" style="background:#5ee08a"></span>reswell</span>
+</div>
+
+<div id="playRow" style="display:none;">
+  <button id="play">PLAY</button>
+  <button class="stop" id="stop">STOP</button>
+  <button id="dl">DOWNLOAD JSON</button>
+</div>
+
+<div id="fp"></div>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
 <script>
-"use strict";
-const statusEl = document.getElementById("status");
-const outEl    = document.getElementById("output");
-const fileEl   = document.getElementById("wavInput");
-const playBtn  = document.getElementById("playBtn");
-const canvas   = document.getElementById("scope");
-
+const SR = 44100;
 let pyodide = null;
-let lastBuffer = null;   // AudioBuffer for playback
-let lastSamples = null;  // Float32Array mono for the scope
+let lastX = null;
+let lastFingerprint = null;
+let audioCtx = null, currentSrc = null;
 
-function setStatus(msg, cls){
-  statusEl.textContent = msg;
-  statusEl.className = cls || "";
+const $ = id => document.getElementById(id);
+const status = m => { $('status').textContent = m; };
+const err    = m => { $('err').textContent = m; };
+
+async function boot() {
+  status('Loading Pyodide...');
+  pyodide = await loadPyodide({
+    indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/'
+  });
+  status('Loading numpy + scipy...');
+  await pyodide.loadPackage(['numpy', 'scipy']);
+  status('Fetching analyzer bundle...');
+  const code = await (await fetch('./analyzer_bundle.py')).text();
+  pyodide.FS.writeFile('/analyzer.py', code);
+  await pyodide.runPythonAsync('import sys; sys.path.insert(0, "/")');
+  await pyodide.runPythonAsync('import analyzer');
+  status('Ready. Drop a WAV.');
 }
-function log(msg){ outEl.textContent += "\n" + msg; outEl.scrollTop = outEl.scrollHeight; }
 
-/* ---------- draw scope (same renderer as the kick demo) ---------- */
-function drawScope(samples, landmarks){
-  const dpr = window.devicePixelRatio || 1;
-  const W = canvas.clientWidth || 1000, H = canvas.clientHeight || 220;
-  canvas.width  = Math.round(W*dpr);
-  canvas.height = Math.round(H*dpr);
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.clearRect(0,0,W,H);
-
-  const padL=44, padR=12, padT=16, padB=26;
-  const plotW = W-padL-padR, plotH = H-padT-padB;
-  const yMid  = padT + plotH/2, yScl = (plotH/2)/1.15;
-
-  const dur_ms = samples.length/44100*1000;
-  const step = dur_ms <= 120 ? 20 : dur_ms <= 260 ? 25 : 50;
-  ctx.strokeStyle="#1a2129"; ctx.fillStyle="#5c6672";
-  ctx.font="10px ui-monospace,monospace"; ctx.textAlign="center";
-  for (let m=0; m<=dur_ms; m+=step){
-    const X = padL + (m/dur_ms)*plotW;
-    ctx.beginPath(); ctx.moveTo(X,padT); ctx.lineTo(X,padT+plotH); ctx.stroke();
-    ctx.fillText(m+" ms", X, H-8);
+async function handleFile(file) {
+  err('');
+  status('Reading ' + file.name + '...');
+  try {
+    const buf = await file.arrayBuffer();
+    lastX = await decodeWav(buf);
+    status('Analyzing ' + (lastX.length / SR * 1000).toFixed(1) + ' ms...');
+    await new Promise(r => setTimeout(r, 20));
+    await analyze();
+    status('Done.');
+  } catch (e) {
+    console.error(e);
+    err('Error: ' + e.message);
+    status('');
   }
-  ctx.strokeStyle="#2a333d";
-  ctx.beginPath(); ctx.moveTo(padL,yMid); ctx.lineTo(padL+plotW,yMid); ctx.stroke();
+}
 
-  const n=samples.length, pxPerCol=n/plotW;
-  ctx.strokeStyle="#4fd6e0"; ctx.lineWidth=1; ctx.beginPath();
-  for (let p=0; p<plotW; p++){
-    const i0=Math.floor(p*pxPerCol), i1=Math.min(n,Math.floor((p+1)*pxPerCol));
-    if (i1<=i0) continue;
-    let mn=1,mx=-1;
-    for (let i=i0;i<i1;i++){const v=samples[i]; if(v<mn)mn=v; if(v>mx)mx=v;}
-    const X=padL+p+0.5;
-    ctx.moveTo(X,yMid-mx*yScl); ctx.lineTo(X,yMid-mn*yScl);
+function decodeWav(arrayBuffer) {
+  return new Promise((resolve, reject) => {
+    const c = new OfflineAudioContext(1, SR, SR);
+    c.decodeAudioData(arrayBuffer.slice(0), ab => {
+      let mono;
+      const ch0 = ab.getChannelData(0);
+      if (ab.numberOfChannels > 1) {
+        mono = new Float32Array(ch0.length);
+        for (let i = 0; i < ch0.length; i++) {
+          let s = 0;
+          for (let ch = 0; ch < ab.numberOfChannels; ch++)
+            s += ab.getChannelData(ch)[i];
+          mono[i] = s / ab.numberOfChannels;
+        }
+      } else {
+        mono = new Float32Array(ch0);
+      }
+      if (ab.sampleRate !== SR) {
+        console.warn('File rate ' + ab.sampleRate + ' != ' + SR +
+                     '; measurements may be off.');
+      }
+      resolve(mono);
+    }, reject);
+  });
+}
+
+async function analyze() {
+  pyodide.globals.set('_x', lastX);
+  pyodide.globals.set('_sr', SR);
+  const res = await pyodide.runPythonAsync(`
+    import analyzer, json
+    _r = analyzer.analyze_array(_x, _sr, source='<browser>', verbose=False)
+    _fp = analyzer.to_json(_r)
+    json.dumps({'fp': _fp})
+  `);
+  const parsed = JSON.parse(res);
+  lastFingerprint = parsed.fp;
+  renderFingerprint(parsed.fp);
+  const arrays = await pyodide.runPythonAsync(`
+    k = _r['kicks'][0] if _r['kicks'] else None
+    out = None
+    if k is not None:
+        a = k['_arrays']
+        out = {
+            't_env': a['t_env'].tolist(),
+            'v_env': a['v_env'].tolist(),
+            'seg':   a['seg'].tolist(),
+        }
+    out
+  `);
+  if (arrays) {
+    const env = parsed.fp.kicks[0]?.detail?.envelope || {};
+    drawScope($('scope'), arrays.seg, arrays.t_env, arrays.v_env, env);
+  }
+  $('playRow').style.display = 'block';
+}
+
+function renderFingerprint(fp) {
+  const k = fp.kicks && fp.kicks[0];
+  if (!k) { $('fp').innerHTML = '<i>no kicks found</i>'; return; }
+  const f  = v => (v == null ? '-' : (typeof v === 'number' ? v.toFixed(3) : v));
+  const f2 = v => (v == null ? '-' : (typeof v === 'number' ? v.toFixed(2) : v));
+  $('fp').innerHTML = `
+    <b>id</b> <span class="val">${fp.id}</span> &middot;
+    <b>class</b> <span class="val">${k.class || '?'}</span>
+    (raw peak <span class="val">${f2(k.raw_peak_ms)} ms</span>)<br>
+    <b>duration</b> <span class="val">${f(k.duration_ms)} ms</span> &middot;
+    <b>attack</b> <span class="val">${f(k.attack_t_ms)} ms</span> &middot;
+    <b>valley</b> <span class="val">${f2(k.valley_t_ms)} ms @ ${f(k.valley_level_pct)}%</span> &middot;
+    <b>reswell</b> <span class="val">${f2(k.reswell_t_ms)} ms @ ${f(k.reswell_level_pct)}%</span><br>
+    <b>f0</b> <span class="val">${f2(k.f_settled_hz)} Hz</span>
+    (agree <span class="val">${f2(k.f_settled_agreement_hz)} Hz</span>)<br>
+    <b>click</b> <span class="val">${k.click_present ? 'present' : 'none'} ${f2(k.click_ratio_db)} dB</span> &middot;
+    <b>2nd harm</b> <span class="val">${f2(k.harmonic_ratio_2f0_db)} dB</span>
+  `;
+}
+
+function drawScope(canvas, seg, t_env, v_env, env) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = 1200, H = 260;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const padL = 52, padR = 16, padT = 18, padB = 28;
+  const pw = W - padL - padR, phh = H - padT - padB;
+  const tmax = Math.min(300, seg.length / SR * 1000);
+  const nMax = Math.min(seg.length, Math.floor(tmax / 1000 * SR));
+
+  ctx.strokeStyle = '#1a2028';
+  for (let ms = 0; ms <= tmax; ms += 25) {
+    const px = padL + (ms / tmax) * pw;
+    ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + phh);
+    ctx.stroke();
+  }
+  for (let a = -1; a <= 1.0001; a += 0.5) {
+    const py = padT + phh / 2 - a * phh / 2;
+    ctx.beginPath(); ctx.moveTo(padL, py); ctx.lineTo(padL + pw, py);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#4fd6e0'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < nMax; i++) {
+    const px = padL + (i / nMax) * pw;
+    const py = padT + phh / 2 - seg[i] * phh / 2 * 0.92;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
   }
   ctx.stroke();
 
-  if (landmarks){
-    const marks=[["attack",landmarks.attack,"#ff5f6d"],
-                 ["valley",landmarks.valley,"#ffd166"],
-                 ["reswell",landmarks.reswell,"#5ee08a"],
-                 ["fall",landmarks.fall,"#a78bfa"]];
-    ctx.font="10px ui-monospace,monospace"; ctx.textAlign="center";
-    for (const [label,t,color] of marks){
-      if (t==null) continue;
-      const X = padL + (t/dur_ms)*plotW;
-      ctx.strokeStyle=color; ctx.globalAlpha=.85;
-      ctx.beginPath(); ctx.moveTo(X,padT); ctx.lineTo(X,padT+plotH); ctx.stroke();
-      ctx.globalAlpha=1; ctx.fillStyle=color; ctx.fillText(label,X,padT-4);
-    }
+  ctx.fillStyle = 'rgba(255,179,71,0.9)';
+  for (let i = 0; i < t_env.length; i++) {
+    if (t_env[i] > tmax) break;
+    const px = padL + (t_env[i] / tmax) * pw;
+    const py = padT + phh / 2 - v_env[i] * phh / 2 * 0.92;
+    ctx.beginPath(); ctx.arc(px, py, 1.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  const marks = [
+    { t: env.attack_t_ms, c: '#ff5f6d', label: 'attack' },
+    { t: env.valley_t_ms, c: '#ffb347', label: 'valley' },
+    { t: env.reswell_t_ms, c: '#5ee08a', label: 'reswell' },
+  ];
+  ctx.font = '10px ui-monospace, monospace';
+  for (const m of marks) {
+    if (m.t == null || m.t < 0 || m.t > tmax) continue;
+    const px = padL + (m.t / tmax) * pw;
+    ctx.strokeStyle = m.c; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + phh);
+    ctx.stroke();
+    ctx.fillStyle = m.c;
+    ctx.fillText(m.label + ' ' + m.t.toFixed(1) + 'ms',
+                 Math.min(px + 4, W - 110), padT + 12);
+  }
+
+  ctx.fillStyle = '#556';
+  for (let ms = 0; ms <= tmax; ms += 50) {
+    const px = padL + (ms / tmax) * pw;
+    ctx.fillText(ms + 'ms', px + 2, H - 8);
   }
 }
 
-/* ---------- AudioContext pinned to 44.1 kHz (gotcha #1) ---------- */
-const AC = new (window.AudioContext || window.webkitAudioContext)({sampleRate:44100});
-
-/* ---------- load a WAV into both AudioBuffer (playback) and Float32Array (scope) ---------- */
-async function loadWav(file){
-  const ab = await file.arrayBuffer();
-  const buf = await AC.decodeAudioData(ab.slice(0));
-  lastBuffer = buf;
-  const ch = buf.getChannelData(0);
-  lastSamples = new Float32Array(ch);  // copy — channel data is live
-  return lastSamples;
+function getCtx() {
+  if (!audioCtx) audioCtx = new AudioContext({ sampleRate: SR });
+  return audioCtx;
+}
+function play() {
+  if (!lastX) return;
+  const c = getCtx();
+  if (c.state === 'suspended') c.resume();
+  stop();
+  const buf = c.createBuffer(1, lastX.length, SR);
+  buf.copyToChannel(lastX, 0);
+  const src = c.createBufferSource();
+  src.buffer = buf; src.connect(c.destination); src.start();
+  currentSrc = src;
+}
+function stop() {
+  if (currentSrc) { try { currentSrc.stop(); } catch(e){} currentSrc = null; }
+}
+function downloadFp() {
+  if (!lastFingerprint) return;
+  const blob = new Blob([JSON.stringify(lastFingerprint, null, 2)],
+                        { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (lastFingerprint.id || 'kick') + '.fingerprint.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-/* ---------- boot Pyodide ---------- */
-async function boot(){
-  try {
-    pyodide = await loadPyodide();
-    setStatus("Loading numpy + scipy…");
-    await pyodide.loadPackage(["numpy","scipy"]);
-    setStatus("Ready. Choose a WAV.");
-    fileEl.disabled = false;
-    playBtn.disabled = false;
-    log("Pyodide ready. numpy + scipy loaded.");
-  } catch(e){
-    setStatus("Pyodide failed: " + e.message, "err");
-    console.error(e);
-  }
-}
-boot();
+const drop = $('drop');
+drop.onclick = () => $('file').click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('hover'); };
+drop.ondragleave = () => drop.classList.remove('hover');
+drop.ondrop = e => {
+  e.preventDefault(); drop.classList.remove('hover');
+  const f = e.dataTransfer.files[0]; if (f) handleFile(f);
+};
+$('file').onchange = e => { const f = e.target.files[0]; if (f) handleFile(f); };
+$('play').onclick = play;
+$('stop').onclick = stop;
+$('dl').onclick = downloadFp;
 
-/* ---------- file → JS array → Python analysis ---------- */
-fileEl.addEventListener("change", async (ev) => {
-  const file = ev.target.files[0];
-  if (!file) return;
-  outEl.textContent = "";
-  setStatus("Decoding " + file.name + "…");
-  const samples = await loadWav(file);
-  setStatus("Analyzing in Python…");
-
-  // Pass samples to Python as a typed array — no JSON, no stringify
-  pyodide.globals.set("_samples", samples);
-  pyodide.runPython(`
-    import numpy as np
-    _x = np.asarray(_samples, dtype=np.float32)
-    _sr = 44100
-    print(f"loaded {len(_x)} samples ({len(_x)/_sr*1000:.1f} ms)")
-  `);
-
-  // --- Your analyzer functions go here, unchanged ---
-  // For now, run a minimal envelope + landmark pass as proof of bridge.
-  const result = pyodide.runPython(`
-    import numpy as np
-    from scipy.signal import find_peaks
-
-    x = _x / (np.abs(_x).max() + 1e-12)
-
-    # cycle-peak envelope (Cell 4, v2)
-    s = np.sign(x); s[s==0]=1
-    zc = np.where(np.diff(s)!=0)[0] + 1
-    t_env, v_env = [], []
-    for k in range(len(zc)-1):
-        a,b = zc[k], zc[k+1]
-        if b-a < 2: continue
-        sub = x[a:b]
-        idx = int(np.argmax(np.abs(sub)))
-        t_env.append((a+idx)/_sr*1000)
-        v_env.append(abs(float(sub[idx])))
-    t_env = np.array(t_env); v_env = np.array(v_env)
-
-    peak = float(v_env.max())
-    i5 = np.where(t_env <= 5.0)[0]
-    i_atk = int(i5[np.argmax(v_env[i5])]) if len(i5) else int(np.argmax(v_env))
-    atk_t = float(t_env[i_atk]); atk_l = float(v_env[i_atk])
-
-    after = t_env > atk_t + 1.0
-    ta, va = t_env[after], v_env[after]
-    prom = 0.05*atk_l
-    valleys,_ = find_peaks(-va, prominence=prom)
-    peaks,_   = find_peaks( va, prominence=prom)
-
-    valley_t = float(ta[valleys[0]]) if len(valleys) else None
-    reswell_t = None
-    if len(valleys):
-        rp = peaks[peaks > valleys[0]]
-        if len(rp): reswell_t = float(ta[rp[0]])
-    above = np.where(v_env > 0.01*atk_l)[0]
-    fall_t = float(t_env[above[-1]]) if len(above) else float(t_env[-1])
-
-    {
-      'attack': atk_t, 'valley': valley_t,
-      'reswell': reswell_t, 'fall': fall_t,
-      'peak_t': float(t_env[int(np.argmax(v_env))]),
-      'dur_ms': float(t_env[-1]),
-    }
-  `);
-  const lm = result.toJs({dict_converter: Object.fromEntries});
-  result.destroy();
-
-  drawScope(samples, lm);
-  log(`dur ${lm.dur_ms.toFixed(1)} ms · attack ${lm.attack.toFixed(2)} ms` +
-      ` · valley ${lm.valley!=null?lm.valley.toFixed(2):"—"} ms` +
-      ` · reswell ${lm.reswell!=null?lm.reswell.toFixed(2):"—"} ms`);
-  setStatus("Done.", "ok");
-});
-
-playBtn.addEventListener("click", () => {
-  if (!lastBuffer) return;
-  if (AC.state === "suspended") AC.resume();
-  const src = AC.createBufferSource();
-  src.buffer = lastBuffer;
-  src.connect(AC.destination);
-  src.start();
-});
+boot().catch(e => { console.error(e); err('Boot failed: ' + e.message); });
 </script>
 </body>
 </html>
