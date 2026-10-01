@@ -99,10 +99,6 @@ const $ = id => document.getElementById(id);
 const status = m => { $('status').textContent = m; };
 const err = m => { $('err').textContent = m; };
 
-// --------------------------------------------------------------
-// Boot: load Pyodide, then load analyzer code (bundle if present,
-// otherwise fetch the source files and concatenate client-side).
-// --------------------------------------------------------------
 async function boot() {
   status('Loading Pyodide...');
   pyodide = await loadPyodide({
@@ -125,52 +121,69 @@ async function loadAnalyzerCode() {
     const r = await fetch('./analyzer_bundle.py', { cache: 'no-store' });
     if (r.ok) {
       const text = await r.text();
-      if (!text.trim().startsWith('<')) {
+      if (!text.trim().startsWith('<') && text.trim().length > 100) {
         status('Loaded analyzer_bundle.py');
         return text;
       }
     }
   } catch (e) { /* fall through */ }
 
-  // Fallback: fetch each source file, strip relative imports,
-  // hoist absolute imports (top-level only), concatenate.
-  status('Bundle missing — fetching sources...');
+  // Fallback: fetch each source file, strip relative imports
+  // (with paren-aware continuation), hoist absolute imports.
+  status('Bundle missing - fetching sources...');
   const files = [
     'analyzer/config.py', 'analyzer/io.py', 'analyzer/onsets.py',
     'analyzer/envelope.py', 'analyzer/pitch_methods.py',
     'analyzer/pitch.py', 'analyzer/spectral.py', 'analyzer/pipeline.py'
   ];
-  const imports = new Set();
+  const imports = [];
+  const seen = new Set();
   const parts = [];
   for (const f of files) {
     const r = await fetch('./' + f, { cache: 'no-store' });
     if (!r.ok) throw new Error('fetch ' + f + ' -> ' + r.status);
     const text = await r.text();
     if (text.trim().startsWith('<')) {
-      throw new Error('Got HTML for ' + f + ' — check the repo file exists');
+      throw new Error('Got HTML for ' + f);
     }
     const lines = text.split('\n');
     const body = [];
-    for (const line of lines) {
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
       const s = line.trim();
-      const isTopLevel = (line === line.replace(/^\s+/, ''));
-      if (isTopLevel && (s.startsWith('from .') || s.startsWith('from ..'))) {
-        continue;
-      }
-      if (isTopLevel && (s.startsWith('import ') || s.startsWith('from '))) {
-        imports.add(s);
+      const top = line.length === 0 || !/^\s/.test(line);
+      if (top && (s.startsWith('from ') || s.startsWith('import '))) {
+        let depth = (line.split('(').length - 1)
+                  - (line.split(')').length - 1);
+        const block = [line];
+        let j = i + 1;
+        while (depth > 0 && j < lines.length) {
+          block.push(lines[j]);
+          depth += (lines[j].split('(').length - 1)
+                 - (lines[j].split(')').length - 1);
+          j++;
+        }
+        const isRel = s.startsWith('from .') || s.startsWith('from ..');
+        if (!isRel) {
+          const key = block.join('\n').trim();
+          if (!seen.has(key)) {
+            seen.add(key);
+            imports.push(block.join('\n'));
+          }
+        }
+        i = j;
         continue;
       }
       body.push(line);
+      i++;
     }
     parts.push('# ===== from ' + f + ' =====\n' + body.join('\n'));
   }
-  return [...imports].sort().join('\n') + '\n\n' + parts.join('\n\n');
+  status('Assembled from ' + files.length + ' source files');
+  return imports.join('\n') + '\n\n' + parts.join('\n\n');
 }
 
-// --------------------------------------------------------------
-// File handling
-// --------------------------------------------------------------
 async function handleFile(file) {
   err('');
   status('Reading ' + file.name + '...');
@@ -213,9 +226,6 @@ function decodeWav(arrayBuffer) {
   });
 }
 
-// --------------------------------------------------------------
-// Analyze + render
-// --------------------------------------------------------------
 async function analyze() {
   pyodide.globals.set('_x', lastX);
   pyodide.globals.set('_sr', SR);
@@ -255,7 +265,6 @@ async function analyze() {
             'centroid': cen_list,
             'seg': a['seg'].tolist(),
             'S': S_norm.tolist(),
-            'sfreq_max': float(a['freqs'][-1]),
             'env': _k['detail']['envelope'],
         }
     json.dumps({'fp': _fp, 'plot': _plot})
@@ -288,9 +297,6 @@ function renderFingerprint(fp) {
   `;
 }
 
-// --------------------------------------------------------------
-// Panels
-// --------------------------------------------------------------
 function panel(id) {
   const c = document.getElementById(id);
   const dpr = window.devicePixelRatio || 1;
@@ -335,7 +341,7 @@ function renderPanels(p) {
   const segN = p.seg.length;
   const tmax = Math.min(300, segN / SR * 1000);
 
-  // --- panel 1: waveform + landmarks ---
+  // Panel 1: waveform + landmarks
   {
     const pan = panel('p_wave');
     const pw = pan.W - pan.padL - pan.padR;
@@ -353,14 +359,16 @@ function renderPanels(p) {
     drawMarks(pan, env, tmax);
   }
 
-  // --- panel 2: envelope comparison ---
+  // Panel 2: envelope comparison
   {
     const pan = panel('p_env');
     const pw = pan.W - pan.padL - pan.padR;
     const ph = pan.H - pan.padT - pan.padB;
-    const maxv = Math.max(...p.v_env, ...p.v_sw, 1e-9);
-    axes(pan.ctx, pan, tmax, [maxv.toFixed(2), (maxv / 2).toFixed(2), '0']);
-    // sliding window (grey)
+    let maxv = 1e-9;
+    for (const v of p.v_env) if (v > maxv) maxv = v;
+    for (const v of p.v_sw) if (v > maxv) maxv = v;
+    axes(pan.ctx, pan, tmax,
+         [maxv.toFixed(2), (maxv / 2).toFixed(2), '0']);
     pan.ctx.strokeStyle = '#667'; pan.ctx.lineWidth = 1;
     pan.ctx.beginPath();
     for (let i = 0; i < p.t_sw.length; i++) {
@@ -370,7 +378,6 @@ function renderPanels(p) {
       i === 0 ? pan.ctx.moveTo(px, py) : pan.ctx.lineTo(px, py);
     }
     pan.ctx.stroke();
-    // cycle-peak (amber)
     pan.ctx.strokeStyle = '#ffb347'; pan.ctx.lineWidth = 1.4;
     pan.ctx.beginPath();
     for (let i = 0; i < p.t_env.length; i++) {
@@ -383,17 +390,18 @@ function renderPanels(p) {
     drawMarks(pan, env, tmax);
   }
 
-  // --- panel 3: spectrogram ---
+  // Panel 3: spectrogram
   {
     const pan = panel('p_spec');
     const pw = pan.W - pan.padL - pan.padR;
     const ph = pan.H - pan.padT - pan.padB;
     axes(pan.ctx, pan, tmax, ['nyq', 'mid', '0 Hz']);
-    const S = p.S;               // nf x nt (0..255)
+    const S = p.S;
     const nf = S.length, nt = S[0].length;
     const tmp = document.createElement('canvas');
     tmp.width = nt; tmp.height = nf;
-    const img = tmp.getContext('2d').createImageData(nt, nf);
+    const ictx = tmp.getContext('2d');
+    const img = ictx.createImageData(nt, nf);
     for (let fr = 0; fr < nf; fr++) {
       for (let t = 0; t < nt; t++) {
         const v = S[nf - 1 - fr][t];
@@ -404,48 +412,49 @@ function renderPanels(p) {
         img.data[i + 3] = 255;
       }
     }
-    tmp.getContext('2d').putImageData(img, 0, 0);
+    ictx.putImageData(img, 0, 0);
     pan.ctx.drawImage(tmp, pan.padL, pan.padT, pw, ph);
     drawMarks(pan, env, tmax);
   }
 
-  // --- panel 4: pitch trace ---
+  // Panel 4: pitch trace
   {
     const pan = panel('p_pitch');
     const pw = pan.W - pan.padL - pan.padR;
     const ph = pan.H - pan.padT - pan.padB;
     const vals = [];
-    for (let i = 0; i < p.f_pitch.length; i++)
-      if (p.f_pitch[i] > 20) vals.push(p.f_pitch[i]);
+    for (const v of p.f_pitch) if (v > 20) vals.push(v);
     if (p.f_pyin) for (const v of p.f_pyin) if (v > 20) vals.push(v);
     if (!vals.length) vals.push(80);
-    let ymin = Math.min(...vals) * 0.85;
-    let ymax = Math.max(...vals) * 1.15;
-    if (ymax / ymin < 2) { const m = Math.sqrt(ymin * ymax); ymin = m / 1.4; ymax = m * 1.4; }
+    let ymin = Math.min.apply(null, vals) * 0.85;
+    let ymax = Math.max.apply(null, vals) * 1.15;
+    if (ymax / ymin < 2) {
+      const m = Math.sqrt(ymin * ymax); ymin = m / 1.4; ymax = m * 1.4;
+    }
     axes(pan.ctx, pan, tmax, [ymax.toFixed(0), 'Hz']);
     const yOf = v => pan.padT + ph - (v - ymin) / (ymax - ymin) * ph;
-    // cycle-length pitch
     pan.ctx.fillStyle = '#ffb347';
     for (let i = 0; i < p.t_pitch.length; i++) {
       if (p.t_pitch[i] > tmax) break;
       const v = p.f_pitch[i]; if (v <= 20) continue;
       const px = pan.padL + (p.t_pitch[i] / tmax) * pw;
-      pan.ctx.beginPath(); pan.ctx.arc(px, yOf(v), 1.4, 0, Math.PI * 2); pan.ctx.fill();
+      pan.ctx.beginPath(); pan.ctx.arc(px, yOf(v), 1.4, 0, Math.PI * 2);
+      pan.ctx.fill();
     }
-    // pYIN (if present)
     if (p.t_pyin) {
       pan.ctx.fillStyle = '#ff5f6d';
       for (let i = 0; i < p.t_pyin.length; i++) {
         if (p.t_pyin[i] > tmax) break;
         const v = p.f_pyin[i]; if (v <= 20) continue;
         const px = pan.padL + (p.t_pyin[i] / tmax) * pw;
-        pan.ctx.beginPath(); pan.ctx.arc(px, yOf(v), 1.4, 0, Math.PI * 2); pan.ctx.fill();
+        pan.ctx.beginPath(); pan.ctx.arc(px, yOf(v), 1.4, 0, Math.PI * 2);
+        pan.ctx.fill();
       }
     }
-    // settled f0 reference line
     const f0 = (lastFingerprint.kicks[0] || {}).f_settled_hz;
     if (f0 && f0 >= ymin && f0 <= ymax) {
-      pan.ctx.strokeStyle = '#5ee08a'; pan.ctx.setLineDash([4, 3]); pan.ctx.lineWidth = 1;
+      pan.ctx.strokeStyle = '#5ee08a'; pan.ctx.setLineDash([4, 3]);
+      pan.ctx.lineWidth = 1;
       pan.ctx.beginPath();
       pan.ctx.moveTo(pan.padL, yOf(f0));
       pan.ctx.lineTo(pan.padL + pw, yOf(f0));
@@ -454,15 +463,17 @@ function renderPanels(p) {
     }
   }
 
-  // --- panel 5: spectral centroid ---
+  // Panel 5: spectral centroid
   {
     const pan = panel('p_cent');
     const pw = pan.W - pan.padL - pan.padR;
     const ph = pan.H - pan.padT - pan.padB;
     const vals = p.centroid.filter(v => v != null && v > 0);
-    const ymin = vals.length ? Math.min(...vals) * 0.8 : 100;
-    const ymax = vals.length ? Math.max(...vals) * 1.2 : 20000;
-    axes(pan.ctx, pan, tmax, [ymax.toFixed(0), ((ymin + ymax) / 2).toFixed(0), ymin.toFixed(0)]);
+    const ymin = vals.length ? Math.min.apply(null, vals) * 0.8 : 100;
+    const ymax = vals.length ? Math.max.apply(null, vals) * 1.2 : 20000;
+    axes(pan.ctx, pan, tmax,
+         [ymax.toFixed(0), ((ymin + ymax) / 2).toFixed(0),
+          ymin.toFixed(0)]);
     const yOf = v => pan.padT + ph - (v - ymin) / (ymax - ymin) * ph;
     pan.ctx.strokeStyle = '#a78bfa'; pan.ctx.lineWidth = 1.4;
     pan.ctx.beginPath();
@@ -479,7 +490,7 @@ function renderPanels(p) {
     pan.ctx.stroke();
   }
 
-  // --- panel 6: attack zoom 0-50 ms ---
+  // Panel 6: attack zoom
   {
     const pan = panel('p_zoom');
     const pw = pan.W - pan.padL - pan.padR;
@@ -494,14 +505,15 @@ function renderPanels(p) {
       i === 0 ? pan.ctx.moveTo(px, py) : pan.ctx.lineTo(px, py);
     }
     pan.ctx.stroke();
-    // cycle-peak markers within 0-50
     pan.ctx.fillStyle = 'rgba(255,179,71,0.95)';
-    const maxv = Math.max(...p.v_env, 1e-9);
+    let maxv = 1e-9;
+    for (const v of p.v_env) if (v > maxv) maxv = v;
     for (let i = 0; i < p.t_env.length; i++) {
       if (p.t_env[i] > 50) break;
       const px = pan.padL + (p.t_env[i] / 50) * pw;
       const py = pan.padT + ph / 2 - (p.v_env[i] / maxv) * ph / 2 * 0.9;
-      pan.ctx.beginPath(); pan.ctx.arc(px, py, 2, 0, Math.PI * 2); pan.ctx.fill();
+      pan.ctx.beginPath(); pan.ctx.arc(px, py, 2, 0, Math.PI * 2);
+      pan.ctx.fill();
     }
     drawMarks(pan, env, 50);
   }
@@ -515,7 +527,8 @@ function drawMarks(pan, env, xmax) {
     [env.valley_t_ms, '#ffb347'],
     [env.reswell_t_ms, '#5ee08a'],
   ];
-  for (const [t, c] of marks) {
+  for (const m of marks) {
+    const t = m[0], c = m[1];
     if (t == null || t < 0 || t > xmax) continue;
     const px = pan.padL + (t / xmax) * pw;
     pan.ctx.strokeStyle = c; pan.ctx.lineWidth = 1.2;
@@ -526,9 +539,6 @@ function drawMarks(pan, env, xmax) {
   }
 }
 
-// --------------------------------------------------------------
-// Playback + download
-// --------------------------------------------------------------
 function getCtx() {
   if (!audioCtx) audioCtx = new AudioContext({ sampleRate: SR });
   return audioCtx;
