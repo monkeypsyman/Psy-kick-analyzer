@@ -56,11 +56,15 @@ def analyze_file(path, window_ms=500, headroom_ms=40,
     return res
 
 
-def analyze_array(x, sr, source='<array>', window_ms=500, headroom_ms=40):
+def analyze_array(x, sr, source='<array>', window_ms=500, headroom_ms=40,
+                  verbose=False):
     meta = {'format': 'array', 'sr_nominal': int(sr), 'path': source}
-    return _run(np.asarray(x, dtype=np.float32), float(sr), meta,
-                source=source, window_ms=window_ms,
-                headroom_ms=headroom_ms)
+    res = _run(np.asarray(x, dtype=np.float32), float(sr), meta,
+               source=source, window_ms=window_ms,
+               headroom_ms=headroom_ms)
+    if verbose:
+        print_report(res)
+    return res
 
 
 # =====================================================================
