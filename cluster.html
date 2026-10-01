@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cluster Tool</title>
+<style>
+  html, body { background:#0f1216; color:#ccd; margin:0; padding:16px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size:13px; }
+  h1 { color:#4fd6e0; font-size:15px; margin:0 0 4px 0; }
+  .sub { color:#667; font-size:11px; margin:0 0 16px 0; }
+  #drop { border:2px dashed #334; border-radius:6px; padding:28px;
+    text-align:center; color:#667; cursor:pointer; font-size:12px; }
+  #drop.hover { border-color:#4fd6e0; color:#4fd6e0; background:#0e1a1e; }
+  #drop input { display:none; }
+  #status { font-size:11px; color:#a78bfa; padding:8px 0; min-height:1em; }
+  #err { font-size:11px; color:#ff5f6d; white-space:pre-wrap; }
+  .panel { background:#0a0d10; border:1px solid #223; border-radius:3px;
+    margin:10px 0; padding:8px 10px; }
+  .panel h3 { font-size:10px; color:#4fd6e0; margin:0 0 6px 0;
+    letter-spacing:.4px; font-weight:600; }
+  pre { font-size:11px; color:#889; margin:0; white-space:pre-wrap;
+    line-height:1.5; }
+  pre .val { color:#5ee08a; }
+  pre .amb { color:#ffb347; }
+</style>
+</head>
+<body>
+<h1>Cluster Tool</h1>
+<p class="sub">Drop .fingerprint.json files. Ward clustering runs in-browser.</p>
+
+<div id="drop">
+  <input type="file" id="file" accept=".json,application/json" multiple>
+  <div>Click or drop .fingerprint.json files here</div>
+</div>
+<div id="status"></div>
+<div id="err"></div>
+
+<div id="results" style="display:none;">
+  <div class="panel">
+    <h3>FILES LOADED</h3>
+    <pre id="filesList"></pre>
+  </div>
+  <div class="panel">
+    <h3>PCA</h3>
+    <pre id="pcaOut"></pre>
+  </div>
+  <div class="panel">
+    <h3>ASSIGNMENTS</h3>
+    <pre id="assignOut"></pre>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
+<script src="cluster_runner.js"></script>
+</body>
+</html>
