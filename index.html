@@ -4,31 +4,34 @@
 <meta charset="utf-8">
 <title>Psy Kick Analyzer</title>
 <style>
-  html, body { background:#0f1216; color:#ccd; margin:0; padding:20px;
+  html, body { background:#0f1216; color:#ccd; margin:0; padding:16px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  h1 { color:#4fd6e0; font-size:16px; margin:0 0 4px 0; }
-  .sub { color:#667; font-size:11px; margin:0 0 20px 0; }
-  #drop { border:2px dashed #334; border-radius:6px; padding:36px;
-    text-align:center; color:#667; cursor:pointer; transition: all .15s;
-    font-size:12px; }
+  h1 { color:#4fd6e0; font-size:15px; margin:0 0 4px 0; }
+  .sub { color:#667; font-size:11px; margin:0 0 16px 0; }
+  #drop { border:2px dashed #334; border-radius:6px; padding:28px;
+    text-align:center; color:#667; cursor:pointer; font-size:12px; }
   #drop.hover { border-color:#4fd6e0; color:#4fd6e0; background:#0e1a1e; }
   #drop input { display:none; }
   #status { font-size:11px; color:#a78bfa; padding:8px 0; min-height:1em; }
   #err { font-size:11px; color:#ff5f6d; white-space:pre-wrap; }
-  canvas { display:block; background:#0a0d10; border:1px solid #223;
-    border-radius:3px; margin:14px 0; width:100%; height:260px; }
-  #fp { font-size:11px; color:#889; line-height:1.7;
-    border-top:1px dashed #223; padding-top:12px; margin-top:12px; }
-  #fp b { color:#a78bfa; }
-  #fp .val { color:#5ee08a; }
+  .panel { background:#0a0d10; border:1px solid #223; border-radius:3px;
+    margin:10px 0; padding:6px 8px 8px 8px; }
+  .panel h3 { font-size:10px; color:#4fd6e0; margin:0 0 4px 0;
+    letter-spacing:.4px; font-weight:600; }
+  canvas { display:block; width:100%; height:180px; background:#0a0d10; }
+  #playRow { margin:10px 0; display:none; }
   button { background:#4fd6e0; color:#04252a; border:0;
     padding:7px 14px; font-family:inherit; font-size:11px;
     font-weight:700; border-radius:3px; cursor:pointer;
     margin-right:6px; letter-spacing:.4px; }
   button.stop { background:#ff5f6d; color:#2a0407; }
   button:hover { filter:brightness(1.15); }
-  .legend { font-size:10px; color:#667; margin:8px 0; }
-  .legend span { margin-right:14px; }
+  #fp { font-size:11px; color:#889; line-height:1.7;
+    border-top:1px dashed #223; padding-top:12px; margin-top:12px; }
+  #fp b { color:#a78bfa; }
+  #fp .val { color:#5ee08a; }
+  .legend { font-size:10px; color:#667; margin:4px 0 0 0; }
+  .legend span { margin-right:12px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%;
     margin-right:5px; vertical-align:middle; }
 </style>
@@ -44,14 +47,39 @@
 <div id="status"></div>
 <div id="err"></div>
 
-<canvas id="scope"></canvas>
-<div class="legend">
-  <span><span class="dot" style="background:#ff5f6d"></span>attack</span>
-  <span><span class="dot" style="background:#ffb347"></span>valley</span>
-  <span><span class="dot" style="background:#5ee08a"></span>reswell</span>
+<div id="panels" style="display:none;">
+  <div class="panel">
+    <h3>WAVEFORM + LANDMARKS</h3>
+    <canvas id="p_wave"></canvas>
+    <div class="legend">
+      <span><span class="dot" style="background:#ff5f6d"></span>attack</span>
+      <span><span class="dot" style="background:#ffb347"></span>valley</span>
+      <span><span class="dot" style="background:#5ee08a"></span>reswell</span>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>ENVELOPE COMPARISON (cycle-peak vs sliding-window)</h3>
+    <canvas id="p_env"></canvas>
+  </div>
+  <div class="panel">
+    <h3>SPECTROGRAM</h3>
+    <canvas id="p_spec"></canvas>
+  </div>
+  <div class="panel">
+    <h3>PITCH TRACE</h3>
+    <canvas id="p_pitch"></canvas>
+  </div>
+  <div class="panel">
+    <h3>SPECTRAL CENTROID</h3>
+    <canvas id="p_cent"></canvas>
+  </div>
+  <div class="panel">
+    <h3>ATTACK ZOOM (0-50 ms)</h3>
+    <canvas id="p_zoom"></canvas>
+  </div>
 </div>
 
-<div id="playRow" style="display:none;">
+<div id="playRow">
   <button id="play">PLAY</button>
   <button class="stop" id="stop">STOP</button>
   <button id="dl">DOWNLOAD JSON</button>
@@ -69,8 +97,12 @@ let audioCtx = null, currentSrc = null;
 
 const $ = id => document.getElementById(id);
 const status = m => { $('status').textContent = m; };
-const err    = m => { $('err').textContent = m; };
+const err = m => { $('err').textContent = m; };
 
+// --------------------------------------------------------------
+// Boot: load Pyodide, then load analyzer code (bundle if present,
+// otherwise fetch the source files and concatenate client-side).
+// --------------------------------------------------------------
 async function boot() {
   status('Loading Pyodide...');
   pyodide = await loadPyodide({
@@ -78,14 +110,67 @@ async function boot() {
   });
   status('Loading numpy + scipy...');
   await pyodide.loadPackage(['numpy', 'scipy']);
-  status('Fetching analyzer bundle...');
-  const code = await (await fetch('./analyzer_bundle.py')).text();
+
+  status('Fetching analyzer code...');
+  const code = await loadAnalyzerCode();
   pyodide.FS.writeFile('/analyzer.py', code);
   await pyodide.runPythonAsync('import sys; sys.path.insert(0, "/")');
   await pyodide.runPythonAsync('import analyzer');
   status('Ready. Drop a WAV.');
 }
 
+async function loadAnalyzerCode() {
+  // Try the bundle first (built by GitHub Action).
+  try {
+    const r = await fetch('./analyzer_bundle.py', { cache: 'no-store' });
+    if (r.ok) {
+      const text = await r.text();
+      if (!text.trim().startsWith('<')) {
+        status('Loaded analyzer_bundle.py');
+        return text;
+      }
+    }
+  } catch (e) { /* fall through */ }
+
+  // Fallback: fetch each source file, strip relative imports,
+  // hoist absolute imports (top-level only), concatenate.
+  status('Bundle missing — fetching sources...');
+  const files = [
+    'analyzer/config.py', 'analyzer/io.py', 'analyzer/onsets.py',
+    'analyzer/envelope.py', 'analyzer/pitch_methods.py',
+    'analyzer/pitch.py', 'analyzer/spectral.py', 'analyzer/pipeline.py'
+  ];
+  const imports = new Set();
+  const parts = [];
+  for (const f of files) {
+    const r = await fetch('./' + f, { cache: 'no-store' });
+    if (!r.ok) throw new Error('fetch ' + f + ' -> ' + r.status);
+    const text = await r.text();
+    if (text.trim().startsWith('<')) {
+      throw new Error('Got HTML for ' + f + ' — check the repo file exists');
+    }
+    const lines = text.split('\n');
+    const body = [];
+    for (const line of lines) {
+      const s = line.trim();
+      const isTopLevel = (line === line.replace(/^\s+/, ''));
+      if (isTopLevel && (s.startsWith('from .') || s.startsWith('from ..'))) {
+        continue;
+      }
+      if (isTopLevel && (s.startsWith('import ') || s.startsWith('from '))) {
+        imports.add(s);
+        continue;
+      }
+      body.push(line);
+    }
+    parts.push('# ===== from ' + f + ' =====\n' + body.join('\n'));
+  }
+  return [...imports].sort().join('\n') + '\n\n' + parts.join('\n\n');
+}
+
+// --------------------------------------------------------------
+// File handling
+// --------------------------------------------------------------
 async function handleFile(file) {
   err('');
   status('Reading ' + file.name + '...');
@@ -121,42 +206,65 @@ function decodeWav(arrayBuffer) {
         mono = new Float32Array(ch0);
       }
       if (ab.sampleRate !== SR) {
-        console.warn('File rate ' + ab.sampleRate + ' != ' + SR +
-                     '; measurements may be off.');
+        console.warn('File rate ' + ab.sampleRate + ' != ' + SR);
       }
       resolve(mono);
     }, reject);
   });
 }
 
+// --------------------------------------------------------------
+// Analyze + render
+// --------------------------------------------------------------
 async function analyze() {
   pyodide.globals.set('_x', lastX);
   pyodide.globals.set('_sr', SR);
   const res = await pyodide.runPythonAsync(`
-    import analyzer, json
+    import analyzer, json, numpy as np
     _r = analyzer.analyze_array(_x, _sr, source='<browser>', verbose=False)
     _fp = analyzer.to_json(_r)
-    json.dumps({'fp': _fp})
+    _k = _r['kicks'][0] if _r['kicks'] else None
+    _plot = None
+    if _k is not None:
+        a = _k['_arrays']
+        S = a['S']
+        nf_t, nt_t = 128, 96
+        S_d = S
+        if S_d.shape[0] > nf_t:
+            bs = S_d.shape[0] // nf_t
+            S_d = S_d[:nf_t*bs].reshape(nf_t, bs, -1).mean(axis=1)
+        if S_d.shape[1] > nt_t:
+            bs = S_d.shape[1] // nt_t
+            S_d = S_d[:, :nt_t*bs].reshape(-1, nt_t, bs).mean(axis=2)
+        S_db = 20 * np.log10(np.maximum(S_d, 1e-10))
+        S_db = np.maximum(S_db, S_db.max() - 60)
+        denom = (S_db.max() - S_db.min() + 1e-10)
+        S_norm = np.round((S_db - S_db.min()) / denom * 255).astype(int)
+        cen_list = [None if np.isnan(v) else float(v) for v in a['centroid']]
+        _plot = {
+            't_env': a['t_env'].tolist(),
+            'v_env': a['v_env'].tolist(),
+            't_sw': a['t_sw'].tolist(),
+            'v_sw': a['v_sw'].tolist(),
+            't_pitch': a['t_pitch'].tolist(),
+            'f_pitch': a['f_pitch'].tolist(),
+            't_pyin': (a['t_pyin'].tolist() if a['t_pyin'] is not None else None),
+            'f_pyin': (a['f_pyin'].tolist() if a['f_pyin'] is not None else None),
+            'times': a['times'].tolist(),
+            'freqs': a['freqs'].tolist(),
+            'centroid': cen_list,
+            'seg': a['seg'].tolist(),
+            'S': S_norm.tolist(),
+            'sfreq_max': float(a['freqs'][-1]),
+            'env': _k['detail']['envelope'],
+        }
+    json.dumps({'fp': _fp, 'plot': _plot})
   `);
   const parsed = JSON.parse(res);
   lastFingerprint = parsed.fp;
   renderFingerprint(parsed.fp);
-  const arrays = await pyodide.runPythonAsync(`
-    k = _r['kicks'][0] if _r['kicks'] else None
-    out = None
-    if k is not None:
-        a = k['_arrays']
-        out = {
-            't_env': a['t_env'].tolist(),
-            'v_env': a['v_env'].tolist(),
-            'seg':   a['seg'].tolist(),
-        }
-    out
-  `);
-  if (arrays) {
-    const env = parsed.fp.kicks[0]?.detail?.envelope || {};
-    drawScope($('scope'), arrays.seg, arrays.t_env, arrays.v_env, env);
-  }
+  if (parsed.plot) renderPanels(parsed.plot);
+  $('panels').style.display = 'block';
   $('playRow').style.display = 'block';
 }
 
@@ -180,73 +288,247 @@ function renderFingerprint(fp) {
   `;
 }
 
-function drawScope(canvas, seg, t_env, v_env, env) {
+// --------------------------------------------------------------
+// Panels
+// --------------------------------------------------------------
+function panel(id) {
+  const c = document.getElementById(id);
   const dpr = window.devicePixelRatio || 1;
-  const W = 1200, H = 260;
-  canvas.width = W * dpr; canvas.height = H * dpr;
-  canvas.style.height = H + 'px';
-  const ctx = canvas.getContext('2d');
+  const W = 1200, H = 180;
+  c.width = W * dpr; c.height = H * dpr;
+  const ctx = c.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
+  return { ctx, W, H, padL: 44, padR: 12, padT: 10, padB: 24 };
+}
 
-  const padL = 52, padR = 16, padT = 18, padB = 28;
-  const pw = W - padL - padR, phh = H - padT - padB;
-  const tmax = Math.min(300, seg.length / SR * 1000);
-  const nMax = Math.min(seg.length, Math.floor(tmax / 1000 * SR));
-
+function axes(ctx, p, xmax, ylabels) {
+  const pw = p.W - p.padL - p.padR, ph = p.H - p.padT - p.padB;
   ctx.strokeStyle = '#1a2028';
-  for (let ms = 0; ms <= tmax; ms += 25) {
-    const px = padL + (ms / tmax) * pw;
-    ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + phh);
+  for (let i = 0; i <= 6; i++) {
+    const px = p.padL + (i / 6) * pw;
+    ctx.beginPath(); ctx.moveTo(px, p.padT); ctx.lineTo(px, p.padT + ph);
     ctx.stroke();
   }
-  for (let a = -1; a <= 1.0001; a += 0.5) {
-    const py = padT + phh / 2 - a * phh / 2;
-    ctx.beginPath(); ctx.moveTo(padL, py); ctx.lineTo(padL + pw, py);
+  for (let i = 0; i <= 4; i++) {
+    const py = p.padT + (i / 4) * ph;
+    ctx.beginPath(); ctx.moveTo(p.padL, py); ctx.lineTo(p.padL + pw, py);
     ctx.stroke();
   }
-
-  ctx.strokeStyle = '#4fd6e0'; ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let i = 0; i < nMax; i++) {
-    const px = padL + (i / nMax) * pw;
-    const py = padT + phh / 2 - seg[i] * phh / 2 * 0.92;
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-  }
-  ctx.stroke();
-
-  ctx.fillStyle = 'rgba(255,179,71,0.9)';
-  for (let i = 0; i < t_env.length; i++) {
-    if (t_env[i] > tmax) break;
-    const px = padL + (t_env[i] / tmax) * pw;
-    const py = padT + phh / 2 - v_env[i] * phh / 2 * 0.92;
-    ctx.beginPath(); ctx.arc(px, py, 1.5, 0, Math.PI * 2); ctx.fill();
-  }
-
-  const marks = [
-    { t: env.attack_t_ms, c: '#ff5f6d', label: 'attack' },
-    { t: env.valley_t_ms, c: '#ffb347', label: 'valley' },
-    { t: env.reswell_t_ms, c: '#5ee08a', label: 'reswell' },
-  ];
-  ctx.font = '10px ui-monospace, monospace';
-  for (const m of marks) {
-    if (m.t == null || m.t < 0 || m.t > tmax) continue;
-    const px = padL + (m.t / tmax) * pw;
-    ctx.strokeStyle = m.c; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + phh);
-    ctx.stroke();
-    ctx.fillStyle = m.c;
-    ctx.fillText(m.label + ' ' + m.t.toFixed(1) + 'ms',
-                 Math.min(px + 4, W - 110), padT + 12);
-  }
-
   ctx.fillStyle = '#556';
-  for (let ms = 0; ms <= tmax; ms += 50) {
-    const px = padL + (ms / tmax) * pw;
-    ctx.fillText(ms + 'ms', px + 2, H - 8);
+  ctx.font = '10px ui-monospace, monospace';
+  for (let i = 0; i <= 3; i++) {
+    const t = Math.round((i / 3) * xmax);
+    ctx.fillText(t + 'ms', p.padL + (i / 3) * pw + 2, p.H - 6);
+  }
+  if (ylabels) {
+    for (let i = 0; i < ylabels.length; i++) {
+      ctx.fillText(ylabels[i],
+                   p.padL - 40,
+                   p.padT + (i / (ylabels.length - 1 || 1)) * ph + 3);
+    }
   }
 }
 
+function renderPanels(p) {
+  const env = p.env || {};
+  const segN = p.seg.length;
+  const tmax = Math.min(300, segN / SR * 1000);
+
+  // --- panel 1: waveform + landmarks ---
+  {
+    const pan = panel('p_wave');
+    const pw = pan.W - pan.padL - pan.padR;
+    const ph = pan.H - pan.padT - pan.padB;
+    axes(pan.ctx, pan, tmax, ['+1', '0', '-1']);
+    const nMax = Math.min(segN, Math.floor(tmax / 1000 * SR));
+    pan.ctx.strokeStyle = '#4fd6e0'; pan.ctx.lineWidth = 1;
+    pan.ctx.beginPath();
+    for (let i = 0; i < nMax; i++) {
+      const px = pan.padL + (i / nMax) * pw;
+      const py = pan.padT + ph / 2 - p.seg[i] * ph / 2 * 0.9;
+      i === 0 ? pan.ctx.moveTo(px, py) : pan.ctx.lineTo(px, py);
+    }
+    pan.ctx.stroke();
+    drawMarks(pan, env, tmax);
+  }
+
+  // --- panel 2: envelope comparison ---
+  {
+    const pan = panel('p_env');
+    const pw = pan.W - pan.padL - pan.padR;
+    const ph = pan.H - pan.padT - pan.padB;
+    const maxv = Math.max(...p.v_env, ...p.v_sw, 1e-9);
+    axes(pan.ctx, pan, tmax, [maxv.toFixed(2), (maxv / 2).toFixed(2), '0']);
+    // sliding window (grey)
+    pan.ctx.strokeStyle = '#667'; pan.ctx.lineWidth = 1;
+    pan.ctx.beginPath();
+    for (let i = 0; i < p.t_sw.length; i++) {
+      if (p.t_sw[i] > tmax) break;
+      const px = pan.padL + (p.t_sw[i] / tmax) * pw;
+      const py = pan.padT + ph - (p.v_sw[i] / maxv) * ph;
+      i === 0 ? pan.ctx.moveTo(px, py) : pan.ctx.lineTo(px, py);
+    }
+    pan.ctx.stroke();
+    // cycle-peak (amber)
+    pan.ctx.strokeStyle = '#ffb347'; pan.ctx.lineWidth = 1.4;
+    pan.ctx.beginPath();
+    for (let i = 0; i < p.t_env.length; i++) {
+      if (p.t_env[i] > tmax) break;
+      const px = pan.padL + (p.t_env[i] / tmax) * pw;
+      const py = pan.padT + ph - (p.v_env[i] / maxv) * ph;
+      i === 0 ? pan.ctx.moveTo(px, py) : pan.ctx.lineTo(px, py);
+    }
+    pan.ctx.stroke();
+    drawMarks(pan, env, tmax);
+  }
+
+  // --- panel 3: spectrogram ---
+  {
+    const pan = panel('p_spec');
+    const pw = pan.W - pan.padL - pan.padR;
+    const ph = pan.H - pan.padT - pan.padB;
+    axes(pan.ctx, pan, tmax, ['nyq', 'mid', '0 Hz']);
+    const S = p.S;               // nf x nt (0..255)
+    const nf = S.length, nt = S[0].length;
+    const tmp = document.createElement('canvas');
+    tmp.width = nt; tmp.height = nf;
+    const img = tmp.getContext('2d').createImageData(nt, nf);
+    for (let fr = 0; fr < nf; fr++) {
+      for (let t = 0; t < nt; t++) {
+        const v = S[nf - 1 - fr][t];
+        const i = (fr * nt + t) * 4;
+        img.data[i]     = v;
+        img.data[i + 1] = Math.floor(v * v / 255);
+        img.data[i + 2] = Math.floor(v * 0.6);
+        img.data[i + 3] = 255;
+      }
+    }
+    tmp.getContext('2d').putImageData(img, 0, 0);
+    pan.ctx.drawImage(tmp, pan.padL, pan.padT, pw, ph);
+    drawMarks(pan, env, tmax);
+  }
+
+  // --- panel 4: pitch trace ---
+  {
+    const pan = panel('p_pitch');
+    const pw = pan.W - pan.padL - pan.padR;
+    const ph = pan.H - pan.padT - pan.padB;
+    const vals = [];
+    for (let i = 0; i < p.f_pitch.length; i++)
+      if (p.f_pitch[i] > 20) vals.push(p.f_pitch[i]);
+    if (p.f_pyin) for (const v of p.f_pyin) if (v > 20) vals.push(v);
+    if (!vals.length) vals.push(80);
+    let ymin = Math.min(...vals) * 0.85;
+    let ymax = Math.max(...vals) * 1.15;
+    if (ymax / ymin < 2) { const m = Math.sqrt(ymin * ymax); ymin = m / 1.4; ymax = m * 1.4; }
+    axes(pan.ctx, pan, tmax, [ymax.toFixed(0), 'Hz']);
+    const yOf = v => pan.padT + ph - (v - ymin) / (ymax - ymin) * ph;
+    // cycle-length pitch
+    pan.ctx.fillStyle = '#ffb347';
+    for (let i = 0; i < p.t_pitch.length; i++) {
+      if (p.t_pitch[i] > tmax) break;
+      const v = p.f_pitch[i]; if (v <= 20) continue;
+      const px = pan.padL + (p.t_pitch[i] / tmax) * pw;
+      pan.ctx.beginPath(); pan.ctx.arc(px, yOf(v), 1.4, 0, Math.PI * 2); pan.ctx.fill();
+    }
+    // pYIN (if present)
+    if (p.t_pyin) {
+      pan.ctx.fillStyle = '#ff5f6d';
+      for (let i = 0; i < p.t_pyin.length; i++) {
+        if (p.t_pyin[i] > tmax) break;
+        const v = p.f_pyin[i]; if (v <= 20) continue;
+        const px = pan.padL + (p.t_pyin[i] / tmax) * pw;
+        pan.ctx.beginPath(); pan.ctx.arc(px, yOf(v), 1.4, 0, Math.PI * 2); pan.ctx.fill();
+      }
+    }
+    // settled f0 reference line
+    const f0 = (lastFingerprint.kicks[0] || {}).f_settled_hz;
+    if (f0 && f0 >= ymin && f0 <= ymax) {
+      pan.ctx.strokeStyle = '#5ee08a'; pan.ctx.setLineDash([4, 3]); pan.ctx.lineWidth = 1;
+      pan.ctx.beginPath();
+      pan.ctx.moveTo(pan.padL, yOf(f0));
+      pan.ctx.lineTo(pan.padL + pw, yOf(f0));
+      pan.ctx.stroke();
+      pan.ctx.setLineDash([]);
+    }
+  }
+
+  // --- panel 5: spectral centroid ---
+  {
+    const pan = panel('p_cent');
+    const pw = pan.W - pan.padL - pan.padR;
+    const ph = pan.H - pan.padT - pan.padB;
+    const vals = p.centroid.filter(v => v != null && v > 0);
+    const ymin = vals.length ? Math.min(...vals) * 0.8 : 100;
+    const ymax = vals.length ? Math.max(...vals) * 1.2 : 20000;
+    axes(pan.ctx, pan, tmax, [ymax.toFixed(0), ((ymin + ymax) / 2).toFixed(0), ymin.toFixed(0)]);
+    const yOf = v => pan.padT + ph - (v - ymin) / (ymax - ymin) * ph;
+    pan.ctx.strokeStyle = '#a78bfa'; pan.ctx.lineWidth = 1.4;
+    pan.ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < p.times.length; i++) {
+      if (p.times[i] > tmax) break;
+      const v = p.centroid[i];
+      if (v == null) { started = false; continue; }
+      const px = pan.padL + (p.times[i] / tmax) * pw;
+      const py = yOf(v);
+      if (!started) { pan.ctx.moveTo(px, py); started = true; }
+      else pan.ctx.lineTo(px, py);
+    }
+    pan.ctx.stroke();
+  }
+
+  // --- panel 6: attack zoom 0-50 ms ---
+  {
+    const pan = panel('p_zoom');
+    const pw = pan.W - pan.padL - pan.padR;
+    const ph = pan.H - pan.padT - pan.padB;
+    axes(pan.ctx, pan, 50, ['+1', '0', '-1']);
+    const nMax = Math.min(segN, Math.floor(0.050 * SR));
+    pan.ctx.strokeStyle = '#4fd6e0'; pan.ctx.lineWidth = 1;
+    pan.ctx.beginPath();
+    for (let i = 0; i < nMax; i++) {
+      const px = pan.padL + (i / nMax) * pw;
+      const py = pan.padT + ph / 2 - p.seg[i] * ph / 2 * 0.9;
+      i === 0 ? pan.ctx.moveTo(px, py) : pan.ctx.lineTo(px, py);
+    }
+    pan.ctx.stroke();
+    // cycle-peak markers within 0-50
+    pan.ctx.fillStyle = 'rgba(255,179,71,0.95)';
+    const maxv = Math.max(...p.v_env, 1e-9);
+    for (let i = 0; i < p.t_env.length; i++) {
+      if (p.t_env[i] > 50) break;
+      const px = pan.padL + (p.t_env[i] / 50) * pw;
+      const py = pan.padT + ph / 2 - (p.v_env[i] / maxv) * ph / 2 * 0.9;
+      pan.ctx.beginPath(); pan.ctx.arc(px, py, 2, 0, Math.PI * 2); pan.ctx.fill();
+    }
+    drawMarks(pan, env, 50);
+  }
+}
+
+function drawMarks(pan, env, xmax) {
+  const pw = pan.W - pan.padL - pan.padR;
+  const ph = pan.H - pan.padT - pan.padB;
+  const marks = [
+    [env.attack_t_ms, '#ff5f6d'],
+    [env.valley_t_ms, '#ffb347'],
+    [env.reswell_t_ms, '#5ee08a'],
+  ];
+  for (const [t, c] of marks) {
+    if (t == null || t < 0 || t > xmax) continue;
+    const px = pan.padL + (t / xmax) * pw;
+    pan.ctx.strokeStyle = c; pan.ctx.lineWidth = 1.2;
+    pan.ctx.beginPath();
+    pan.ctx.moveTo(px, pan.padT);
+    pan.ctx.lineTo(px, pan.padT + ph);
+    pan.ctx.stroke();
+  }
+}
+
+// --------------------------------------------------------------
+// Playback + download
+// --------------------------------------------------------------
 function getCtx() {
   if (!audioCtx) audioCtx = new AudioContext({ sampleRate: SR });
   return audioCtx;
